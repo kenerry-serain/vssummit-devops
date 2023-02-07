@@ -1,0 +1,70 @@
+# ASP.NET Core (.NET Framework)
+# Build and test ASP.NET Core projects targeting the full .NET Framework.
+# Add steps that publish symbols, save build artifacts, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
+
+parameters:
+  - name: awsRegion
+    type: string
+  - name: ecrRepositoryProd
+    type: string
+  - name: dockerFilePath
+    type: string
+  - name: dockerBuildContext
+    type: string
+  - name: ecrImagePrefix
+    type: string
+    
+variables:
+  solution: "**/*.sln"
+  buildConfiguration: "Release"
+  awsRegion: '${{ parameters.awsRegion }}'
+  ecrRepositoryProd: '${{ parameters.ecrRepositoryProd }}'
+  dockerFilePath: '${{ parameters.dockerFilePath }}'
+  dockerBuildContext: '${{ parameters.dockerBuildContext }}'
+  ecrImagePrefix: '${{ parameters.ecrImagePrefix }}'
+  argoPrdFolder: './'
+  isPrd: $[or(eq(variables['Build.SourceBranchName'], 'master'),eq(variables['Build.SourceBranchName'], 'main'), eq(variables['Build.SourceBranchName'], 'prd-pipeline-setup'))]
+stages:
+  - stage: PROD
+    condition: eq(variables.isPrd, 'true')
+    displayName: PROD
+    jobs:
+      - job: ProdJob
+        pool:
+          vmImage: "ubuntu-20.04"
+        steps:
+          - task: DotNetCoreCLI@2
+            displayName: "DotNetCore - Building projects"
+            inputs:
+              command: "build"
+              projects: "**/*.csproj"
+              arguments: "--configuration $(buildConfiguration)"
+          - task: DotNetCoreCLI@2
+            displayName: "DotNetCore - Running Tests"
+            inputs:
+              command: test
+              projects: "**/*Tests/*.csproj"
+          - task: Docker@2
+            displayName: "Docker - Building Image"
+            inputs:
+              buildContext: $(dockerBuildContext)
+              command: "build"
+              Dockerfile: $(dockerFilePath)
+              arguments: "-t $(ecrRepositoryProd)"
+              tags: latest
+          - task: ECRPushImage@1
+            displayName: "AWS - Pushing image to ECR"
+            inputs:
+              awsCredentials: "aws-vssummit-connection"
+              regionName: "$(awsRegion)"
+              sourceImageName: "$(ecrRepositoryProd)"
+              repositoryName: "$(ecrRepositoryProd)"
+              sourceImageTag: "latest"
+              pushTag: $(Build.BuildNumber)
+          - task: ShellScript@2
+            displayName: "Editing k8s file on GitOps Repository"
+            inputs:
+              scriptPath: ./cli/update-kustomize-image.sh
+              args: $(argoPrdFolder) $(ecrImagePrefix) $(ecrRepositoryProd) $(Build.BuildNumber)
+
